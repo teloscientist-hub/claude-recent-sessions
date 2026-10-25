@@ -1,0 +1,11 @@
+{
+  "name": "recent-sessions",
+  "owner": { "name": "teloscientist-hub" },
+  "plugins": [
+    {
+      "name": "recent-sessions",
+      "description": "A docked pane listing the 25 most recently active sessions with a status dot",
+      "source": "./"
+    }
+  ]
+}
