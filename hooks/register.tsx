@@ -1,5 +1,5 @@
 import { atom, read, update } from 'claude-code'
-import type { EngineInterface, Register } from 'claude-code'
+import type { EngineInterface, Register, Timer } from 'claude-code'
 
 import type { RecentSession, RecentSessionsView } from '../types'
 
@@ -222,6 +222,57 @@ async function refresh($: EngineInterface): Promise<void> {
   }
 }
 
+// The poll. Timers end when the module reloads (/reload-plugins) or when one
+// tick is refused, and nothing says so, so the pane restarts the poll itself
+// whenever it has gone quiet, instead of trusting session.start to run again.
+let timer: Timer | undefined
+let lastTickAt = 0
+let isRefreshing = false
+// A refresh that hangs (an MCP call that never answers) would otherwise hold
+// isRefreshing forever, which is the same freeze by another road.
+const REFRESH_LIMIT_MS = 60_000
+
+async function refreshOnce($: EngineInterface): Promise<void> {
+  if (isRefreshing) return
+  isRefreshing = true
+  let isDone = false
+  try {
+    // Throws only while the refresh is still running, so a finished one leaves nothing behind.
+    const limit = $.clock.sleep(REFRESH_LIMIT_MS).then(() => {
+      if (!isDone) throw new Error(`a refresh took longer than ${REFRESH_LIMIT_MS / 1000}s`)
+    })
+    await Promise.race([refresh($), limit])
+  } catch (err) {
+    const message = err instanceof Error ? err.message : String(err)
+    await update($, view, v => ({ ...v, error: message }))
+  } finally {
+    isDone = true
+    isRefreshing = false
+  }
+}
+
+async function tick($: EngineInterface): Promise<void> {
+  lastTickAt = await $.clock.now()
+  await refreshOnce($)
+}
+
+const isQuiet = (now: number): boolean => !timer || now - lastTickAt >= POLL_MS * 3
+
+async function ensureTicking($: EngineInterface): Promise<void> {
+  const now = await $.clock.now()
+  if (!isQuiet(now)) return
+  timer?.cancel()
+  lastTickAt = now
+  timer = $.clock.every(POLL_MS, () => void tick($))
+  await refreshOnce($)
+}
+
+function clockTime(ms: number): string {
+  const d = new Date(ms)
+  const two = (n: number) => String(n).padStart(2, '0')
+  return `${two(d.getHours())}:${two(d.getMinutes())}:${two(d.getSeconds())}`
+}
+
 async function markClosed($: EngineInterface, s: RecentSession): Promise<void> {
   const marks = await readClosed($)
   const closedAt = new Date(await $.clock.now()).toISOString()
@@ -272,15 +323,26 @@ export const register: Register = on => {
       description: 'Show the 25 most recently active sessions in a side pane',
     })
     void $.ui.open({ id: PANE, title: 'Recent sessions' })
-    void refresh($)
-    $.clock.every(POLL_MS, () => refresh($))
+    void ensureTicking($)
 
+    return next(e)
+  })
+
+  // Frequent events double as a heartbeat for the poll.
+  on('prompt.submit', async ($, e, next) => {
+    void ensureTicking($)
+    return next(e)
+  })
+
+  on('turn.complete', async ($, e, next) => {
+    void ensureTicking($)
     return next(e)
   })
 
   on('command.run', { command: 'recent-sessions' }, async $ => {
     await $.ui.open({ id: PANE, title: 'Recent sessions' })
-    await refresh($)
+    await ensureTicking($)
+    await refreshOnce($)
 
     return { text: 'Recent sessions pane opened.' }
   })
@@ -289,11 +351,14 @@ export const register: Register = on => {
     const { Box, Text, Button } = $.ui.resolve(e)
     const v = await read($, view)
     const now = await $.clock.now()
+    // A drawing cannot write state, so a restart is scheduled to run just after it.
+    if (isQuiet(now)) $.clock.after(0, () => void ensureTicking($))
 
     return (
       <Box flexDirection="column" gap={1}>
         {v.error && <Text color="#f85149">Could not list sessions: {v.error}</Text>}
         {!v.error && v.fetchedAt === null && <Text dimColor>Loading…</Text>}
+        {v.fetchedAt !== null && <Text dimColor>Updated {clockTime(v.fetchedAt)}</Text>}
         {v.sessions.slice(0, v.limit).map(s => (
           <Box flexDirection="row" gap={1}>
             <Button key={`close:${s.id}`} plain onPress={() => markClosed($, s)}>
@@ -323,7 +388,7 @@ export const register: Register = on => {
           </Box>
         ))}
         <Box flexDirection="row" gap={1}>
-          <Button key="refresh" onPress={() => refresh($)}>Refresh</Button>
+          <Button key="refresh" onPress={() => refreshOnce($)}>Refresh</Button>
           <Button key="length" dimColor onPress={() => toggleLength($)}>
             {v.limit === SHORT ? `Show ${LIMIT}` : `Show ${SHORT}`}
           </Button>

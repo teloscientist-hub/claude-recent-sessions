@@ -350,3 +350,17 @@ test('without RECENT_SESSIONS_STATE_DIR the closed list lives under ~/.claude', 
   expect([...files.keys()]).toEqual(['/Users/someone/.claude/recent-sessions/closed.json'])
   await ui.unmount()
 })
+
+test('the pane says when it last read the session list', async ($, on) => {
+  stubEngine(on, () => others)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'refresh' })
+  // The stub clock reads 2026-10-23 14:05:00 UTC, shown in local time.
+  const at = new Date(Date.parse('2026-10-23T14:05:00.000Z'))
+  const two = (n: number) => String(n).padStart(2, '0')
+  const want = `Updated ${two(at.getHours())}:${two(at.getMinutes())}:${two(at.getSeconds())}`
+  expect((await ui.find({ type: 'Text', text: /^Updated / }))?.text).toBe(want)
+  await ui.unmount()
+})
