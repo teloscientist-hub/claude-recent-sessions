@@ -25,10 +25,10 @@ const CLOSED_FILE = 'closed.json'
 // mods. Needs-input and failed are read off each transcript's tail instead
 // (list_events: its last line and its last [result] line); unread
 // has no source, so an idle session with nothing standing out draws no dot.
-const DOT_RUNNING = 'success'
+const DOT_RUNNING = '#a371f7'
 const DOT_NEEDS_INPUT = 'warning'
 const DOT_FAILED = 'error'
-const DOT_YOUR_MOVE = '#a371f7'
+const DOT_YOUR_MOVE = 'success'
 // Seen live 2026-10-23: a session blocked on a question to the person stays
 // "(running)" and its transcript ends on the unanswered call. A permission
 // prompt cannot be told apart from a tool still working, so it is not counted.

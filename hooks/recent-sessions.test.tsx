@@ -126,7 +126,7 @@ test('lists 25 sessions, this one included and bold, by recent activity', async 
     // Dots only on running sessions (local_0 and this one), drawn outside any Button.
     const dots = await ui.findAll({ type: 'Text', text: /^●$/ })
     expect(dots).toHaveLength(2)
-    expect(dots.every(d => d.props.color === 'success')).toBe(true)
+    expect(dots.every(d => d.props.color === '#a371f7')).toBe(true)
     await ui.unmount()
   }
 })
@@ -243,7 +243,7 @@ test('a shared file that does not parse is shown as an error and left alone', as
   await ui.unmount()
 })
 
-test('dots: red failed, yellow asking you now, purple your move; read once per change', async ($, on) => {
+test('dots: red failed, yellow asking you now, green your move; read once per change', async ($, on) => {
   const events = {
     local_5: 'Session "Five (draft)" (idle) — showing 2 of 9 messages\n\n[assistant] hm\n[result] done (error_during_execution), 2 turns',
     // As seen live on 2026-10-23 for a session blocked on a question.
@@ -264,7 +264,7 @@ test('dots: red failed, yellow asking you now, purple your move; read once per c
   const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
   await ui.press({ key: 'refresh' })
   const dots = await ui.findAll({ type: 'Text', text: /^●$/ })
-  expect(dots.map(d => d.props.color).sort()).toEqual(['#a371f7', '#a371f7', '#a371f7', 'error', 'success', 'success', 'warning'])
+  expect(dots.map(d => d.props.color).sort()).toEqual(['#a371f7', '#a371f7', 'error', 'success', 'success', 'success', 'warning'])
   expect(reads).not.toContain('local_self')
 
   // Nothing moved: no transcript is read again.

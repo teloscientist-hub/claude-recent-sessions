@@ -10,9 +10,9 @@ A Claude mod for the Claude desktop app (Code tab). It docks a panel beside the 
 
 | Dot | Meaning |
 |---|---|
-| green | running |
+| purple | running |
 | yellow | running, and stopped on a question to you or a plan waiting for approval |
-| purple | your move: finished, and its last reply asks you something or offers labelled options |
+| green | your move: finished, and its last reply asks you something or offers labelled options |
 | red | its last run ended in an error |
 | none | idle, nothing waiting |
 
@@ -80,5 +80,5 @@ claude plugin marketplace remove recent-sessions
 ## Limits
 
 - The sidebar's own **blue "unread"** state can't be read by a mod, so it has no dot here.
-- A session stopped on a **permission prompt** shows green, not yellow: its transcript looks the same as a tool that is still working.
-- Purple is a reading of the last reply's text, so a reply that ends with a quoted question can show purple wrongly.
+- A session stopped on a **permission prompt** shows purple, not yellow: its transcript looks the same as a tool that is still working.
+- Green is a reading of the last reply's text, so a reply that ends with a quoted question can show green wrongly.
