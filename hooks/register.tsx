@@ -10,8 +10,11 @@ const SHORT = 10
 // Fetched past LIMIT so closed sessions leave room for the next ones.
 const FETCH = 50
 const POLL_MS = 15_000
-// The desktop app's own session-management MCP server.
+// The desktop app's own session-management MCP server, by its usual name. The
+// live name is read off the session's tool list first, since a session may
+// carry the server under another name, or not at all.
 const SERVER = 'ccd_session_mgmt'
+const LIST_TOOL = /^mcp__(.+)__list_sessions$/
 // The closed marks live in one file every copy of the mod and every session
 // shares (a plugin's own store is per install): session id -> its lastActivityAt
 // when it was marked closed. In $RECENT_SESSIONS_STATE_DIR when it is set,
@@ -103,8 +106,39 @@ async function writeClosed($: EngineInterface, marks: Closed): Promise<void> {
   await $.fs.write(await closedFile($), `${JSON.stringify(marks, null, 2)}\n`)
 }
 
+let server: string | undefined
+
+async function sessionServer($: EngineInterface): Promise<string> {
+  if (server) return server
+  const tools = await $.tool.list()
+  // A tool the session loads on demand may be missing from the list: fall back to the usual name.
+  server = tools.map(t => LIST_TOOL.exec(t.name)?.[1]).find(Boolean) ?? SERVER
+  return server
+}
+
+async function mcpCall(
+  $: EngineInterface,
+  tool: string,
+  args: Record<string, unknown>,
+): ReturnType<EngineInterface['mcp']['call']> {
+  try {
+    return await $.mcp.call(await sessionServer($), tool, args)
+  } catch (err) {
+    // The server may have been renamed or reconnected: look it up again next time.
+    const tried = server
+    server = undefined
+    const message = err instanceof Error ? err.message : String(err)
+    if (/no connected MCP/i.test(message)) {
+      throw new Error(
+        `the desktop app's session tools are not connected in this session (tried the server "${tried}"); retrying every ${POLL_MS / 1000}s`,
+      )
+    }
+    throw err
+  }
+}
+
 async function callJson($: EngineInterface, tool: string, args: Record<string, unknown>): Promise<unknown> {
-  const res = await $.mcp.call(SERVER, tool, args)
+  const res = await mcpCall($, tool, args)
   const block = res.content.find(b => b.type === 'text') as { text?: string } | undefined
   if (res.isError || !block?.text) throw new Error(block?.text ?? 'no result')
   return JSON.parse(block.text)
@@ -119,7 +153,7 @@ async function readAttention($: EngineInterface, s: RecentSession): Promise<Rece
   if (hit?.stamp === stamp) return hit.attention
   let attention: RecentSession['attention'] = null
   try {
-    const res = await $.mcp.call(SERVER, 'list_events', { session_id: s.id, limit: TAIL })
+    const res = await mcpCall($, 'list_events', { session_id: s.id, limit: TAIL })
     const text = res.content.map(b => (b.type === 'text' ? (b as { text: string }).text : '')).join('\n')
     const results = text.match(/^\[result\] .*$/gm)
     const lastResult = results?.at(-1) ?? ''

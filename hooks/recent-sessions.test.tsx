@@ -62,12 +62,24 @@ function stubEngine(
   detailReads: string[] = [],
   // $RECENT_SESSIONS_STATE_DIR as the session's shell sees it; '' when unset.
   stateDir = '/state/recent-sessions',
+  // The app's server as the session has it: its tools as $.tool.list shows them,
+  // and the name it answers to (undefined: not connected). Calls are logged.
+  app: { listed: string[]; connected: () => string | undefined; calls: string[] } = {
+    listed: [],
+    connected: () => 'ccd_session_mgmt',
+    calls: [],
+  },
 ) {
+  on('tool.list', () => ({ value: app.listed.map(name => ({ name, description: '', mcp: true })) }))
   on('command.register', () => ({ value: { command: 'recent-sessions' } }))
   on('ui.open', () => ({ value: { isPlaced: true } }))
   on('clock.every', () => ({ deny: 'no ticks in tests' }))
   on('clock.now', () => ({ value: Date.parse('2026-10-23T14:05:00.000Z') }))
-  on('mcp.call', (_: unknown, e: { tool: string; args: { session_id?: string } }) => {
+  on('mcp.call', (_: unknown, e: { server: string; tool: string; args: { session_id?: string } }) => {
+    app.calls.push(e.server)
+    if (e.server !== app.connected()) {
+      return { deny: `no connected MCP tool "${e.tool}" on a server named "${e.server}"` }
+    }
     if (isBroken) return { value: { content: [{ type: 'text', text: 'no such server' }], isError: true } }
     if (e.tool === 'list_events') {
       const id = e.args.session_id ?? ''
@@ -362,5 +374,37 @@ test('the pane says when it last read the session list', async ($, on) => {
   const two = (n: number) => String(n).padStart(2, '0')
   const want = `Updated ${two(at.getHours())}:${two(at.getMinutes())}:${two(at.getSeconds())}`
   expect((await ui.find({ type: 'Text', text: /^Updated / }))?.text).toBe(want)
+  await ui.unmount()
+})
+
+test('the app server is found by its tools, under whatever name the session gives it', async ($, on) => {
+  const app = { listed: ['Read', 'mcp__desktop_sessions__list_sessions'], connected: () => 'desktop_sessions', calls: [] as string[] }
+  stubEngine(on, () => others, false, new Map(), [], {}, [], new Set(), [], '/state/recent-sessions', app)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ type: 'Text', text: /Could not list/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'local_0' })).toBeDefined()
+  expect(new Set(app.calls)).toEqual(new Set(['desktop_sessions']))
+  await ui.unmount()
+})
+
+test('with the app server missing it says so plainly, and recovers when it connects', async ($, on) => {
+  let isUp = false
+  const app = { listed: [] as string[], connected: () => (isUp ? 'ccd_session_mgmt' : undefined), calls: [] as string[] }
+  stubEngine(on, () => others, false, new Map(), [], {}, [], new Set(), [], '/state/recent-sessions', app)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'refresh' })
+  const error = (await ui.find({ type: 'Text', text: /Could not list/ }))?.text ?? ''
+  expect(error).toContain("the desktop app's session tools are not connected in this session")
+  expect(error).toContain('ccd_session_mgmt')
+
+  isUp = true
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ type: 'Text', text: /Could not list/ })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'local_0' })).toBeDefined()
   await ui.unmount()
 })
