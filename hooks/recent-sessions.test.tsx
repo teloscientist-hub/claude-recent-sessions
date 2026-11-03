@@ -274,6 +274,49 @@ test('dots: red failed, yellow asking you now, green your move; read once per ch
   await ui.unmount()
 })
 
+test('orange: a session whose turn ended with background agents still at work', async ($, on) => {
+  const now = Date.parse('2026-10-23T14:05:00.000Z')
+  const home = '/Users/someone'
+  const records = `${home}/Library/Application Support/Claude/claude-code-sessions`
+  const folder = (cli: string) => `${home}/.claude/projects/-work-corpus/${cli}/subagents`
+  const files = new Map<string, string>([
+    [`${records}/acct/org/local_3.json`, JSON.stringify({ cliSessionId: 'cli-3' })],
+    [`${records}/acct/org/local_4.json`, JSON.stringify({ cliSessionId: 'cli-4' })],
+    [`${records}/acct/org/local_5.json`, JSON.stringify({ cliSessionId: 'cli-5' })],
+    // local_3: one agent still at work beside one finished.
+    [`${folder('cli-3')}/agent-a.meta.json`, JSON.stringify({ requestShape: 'background' })],
+    [`${folder('cli-3')}/agent-b.meta.json`, JSON.stringify({ finished: true })],
+    // local_4: every agent finished.
+    [`${folder('cli-4')}/agent-c.meta.json`, JSON.stringify({ finished: true })],
+    // local_5: unfinished, but silent for an hour: taken as gone.
+    [`${folder('cli-5')}/agent-d.meta.json`, JSON.stringify({})],
+  ])
+  const dirs: Record<string, { name: string; kind: string; mtimeMs: number }[]> = {
+    [records]: [{ name: 'acct', kind: 'dir', mtimeMs: 0 }],
+    [`${records}/acct`]: [{ name: 'org', kind: 'dir', mtimeMs: 0 }],
+    [folder('cli-3')]: [
+      { name: 'agent-a.jsonl', kind: 'file', mtimeMs: now - 30_000 },
+      { name: 'agent-a.meta.json', kind: 'file', mtimeMs: now - 600_000 },
+      { name: 'agent-b.jsonl', kind: 'file', mtimeMs: now - 60_000 },
+    ],
+    [folder('cli-4')]: [{ name: 'agent-c.jsonl', kind: 'file', mtimeMs: now - 30_000 }],
+    [folder('cli-5')]: [{ name: 'agent-d.jsonl', kind: 'file', mtimeMs: now - 3_600_000 }],
+  }
+  stubEngine(on, () => others.map(r => ({ ...r, cwd: '/work/corpus' })), false, files)
+  on('fs.list', (_: unknown, e: { path: string }) =>
+    dirs[e.path] ? { value: dirs[e.path]!.map(d => ({ ...d, size: 0, isLink: false })) } : { deny: 'missing' },
+  )
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'refresh' })
+  const dots = await ui.findAll({ type: 'Text', text: /^●$/ })
+  // This session's own purple, and local_3's orange; local_4 and local_5 draw none.
+  expect(dots.map(d => d.props.color).sort()).toEqual(['#a371f7', '#f0883e'])
+  expect(await ui.find({ type: 'Text', text: /agents working/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('scheduled-task sessions are left out, each looked up once', async ($, on) => {
   const reads: string[] = []
   stubEngine(on, () => others, false, new Map(), [], {}, [], new Set(['local_3', 'local_7']), reads)

@@ -10,6 +10,10 @@ export type RecentSession = {
   isCurrent: boolean
   // Read from the tail of its transcript; null when nothing stands out.
   attention: 'needsInput' | 'failed' | 'yourMove' | null
+  // Its own turn has ended but background agents it started are still at work.
+  agentsBusy: boolean
+  // The session's folder, which names its transcript folder.
+  cwd?: string
 }
 
 export type RecentSessionsView = {

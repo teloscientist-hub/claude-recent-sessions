@@ -29,6 +29,9 @@ const DOT_RUNNING = '#a371f7'
 const DOT_NEEDS_INPUT = 'warning'
 const DOT_FAILED = 'error'
 const DOT_YOUR_MOVE = 'success'
+const DOT_AGENTS = '#f0883e'
+// An agent whose transcript has not moved for this long is taken as gone, finished or not.
+const AGENT_QUIET_MS = 10 * 60_000
 // Seen live 2026-10-23: a session blocked on a question to the person stays
 // "(running)" and its transcript ends on the unanswered call. A permission
 // prompt cannot be told apart from a tool still working, so it is not counted.
@@ -59,6 +62,7 @@ type Row = {
   group?: { name: string } | null
   lastActivityAt?: string
   link?: string
+  cwd?: string
   // Only get_session reports it: the scheduled task a session runs for.
   scheduledTaskId?: string
 }
@@ -79,19 +83,24 @@ function ago(iso: string, now: number): string {
   return `${Math.round(s / 86400)}d`
 }
 
-let closedPath: string | undefined
+let shellEnv: { stateDir: string; home: string } | undefined
 
-async function closedFile($: EngineInterface): Promise<string> {
-  if (closedPath) return closedPath
+async function readShellEnv($: EngineInterface): Promise<{ stateDir: string; home: string }> {
+  if (shellEnv) return shellEnv
   const { exitCode, stdout } = await $.process.run([
     '/bin/sh',
     '-c',
     'printf "%s\\n%s" "$RECENT_SESSIONS_STATE_DIR" "$HOME"',
   ])
-  const [dir = '', home = ''] = stdout.split('\n').map(line => line.trim())
-  if (exitCode !== 0 || (!dir && !home)) throw new Error('could not find a folder for the closed list')
-  closedPath = `${dir || `${home}/.claude/recent-sessions`}/${CLOSED_FILE}`
-  return closedPath
+  const [stateDir = '', home = ''] = stdout.split('\n').map(line => line.trim())
+  if (exitCode !== 0 || (!stateDir && !home)) throw new Error('could not find a folder for the closed list')
+  shellEnv = { stateDir, home }
+  return shellEnv
+}
+
+async function closedFile($: EngineInterface): Promise<string> {
+  const { stateDir, home } = await readShellEnv($)
+  return `${stateDir || `${home}/.claude/recent-sessions`}/${CLOSED_FILE}`
 }
 
 async function readClosed($: EngineInterface): Promise<Closed> {
@@ -187,6 +196,77 @@ async function isScheduled($: EngineInterface, id: string): Promise<boolean> {
   return isTask
 }
 
+// Background agents. The app's isRunning covers a session's own turn only: once
+// the turn ends with agents still at work it reads idle. Each agent keeps
+// <transcript>/subagents/agent-<id>.jsonl beside a .meta.json that gains
+// "finished": true when it ends. The transcript is named by the CLI's session id,
+// which only the app's own record of the session holds:
+// ~/Library/Application Support/Claude/claude-code-sessions/<a>/<b>/<app id>.json.
+let recordDirs: string[] | undefined
+const cliIds = new Map<string, string | null>()
+// Meta files read as finished are not read again.
+const finishedAgents = new Set<string>()
+
+async function listNames($: EngineInterface, path: string, kind: 'file' | 'dir'): Promise<string[]> {
+  try {
+    return (await $.fs.list(path)).filter(e => e.kind === kind).map(e => e.name)
+  } catch {
+    return []
+  }
+}
+
+async function cliIdOf($: EngineInterface, id: string, home: string): Promise<string | null> {
+  if (cliIds.has(id)) return cliIds.get(id) ?? null
+  if (!recordDirs) {
+    const root = `${home}/Library/Application Support/Claude/claude-code-sessions`
+    recordDirs = []
+    for (const a of await listNames($, root, 'dir')) {
+      for (const b of await listNames($, `${root}/${a}`, 'dir')) recordDirs.push(`${root}/${a}/${b}`)
+    }
+  }
+  for (const dir of recordDirs) {
+    try {
+      const record = JSON.parse(await $.fs.read(`${dir}/${id}.json`)) as { cliSessionId?: unknown }
+      const cli = typeof record.cliSessionId === 'string' ? record.cliSessionId : null
+      cliIds.set(id, cli)
+      return cli
+    } catch {
+      // Not in this folder.
+    }
+  }
+  // Unfound now may be found after a restart of the app: not cached.
+  return null
+}
+
+async function hasBusyAgents($: EngineInterface, id: string, cwd: string | undefined, now: number): Promise<boolean> {
+  if (!cwd) return false
+  try {
+    const { home } = await readShellEnv($)
+    const cli = await cliIdOf($, id, home)
+    if (!cli) return false
+    const dir = `${home}/.claude/projects/${cwd.replace(/[^A-Za-z0-9]/g, '-')}/${cli}/subagents`
+    const entries = await $.fs.list(dir)
+    for (const e of entries) {
+      if (e.kind !== 'file' || !/^agent-.*\.jsonl$/.test(e.name) || now - e.mtimeMs > AGENT_QUIET_MS) continue
+      const meta = `${dir}/${e.name.replace(/\.jsonl$/, '.meta.json')}`
+      if (finishedAgents.has(meta)) continue
+      try {
+        const m = JSON.parse(await $.fs.read(meta)) as { finished?: unknown }
+        if (m.finished === true) {
+          finishedAgents.add(meta)
+          continue
+        }
+      } catch {
+        // No meta yet: the agent has just started.
+      }
+      return true
+    }
+  } catch {
+    // No agents folder, or none readable: no dot of this kind.
+  }
+  return false
+}
+
 function toSession(r: Row, isCurrent: boolean): RecentSession {
   return {
     id: r.sessionId,
@@ -198,6 +278,8 @@ function toSession(r: Row, isCurrent: boolean): RecentSession {
     link: r.link ?? null,
     isCurrent,
     attention: null,
+    agentsBusy: false,
+    cwd: r.cwd,
   }
 }
 
@@ -233,6 +315,8 @@ async function refresh($: EngineInterface): Promise<void> {
     }
     // list_events refuses the session it is asked from; its own state shows anyway.
     for (const s of sessions) if (!s.isCurrent) s.attention = await readAttention($, s)
+    const probedAt = await $.clock.now()
+    for (const s of sessions) if (!s.isRunning) s.agentsBusy = await hasBusyAgents($, s.id, s.cwd, probedAt)
 
     // Most recently closed first; marks with no close time after, by activity.
     closed.sort((a, b) => {
@@ -345,7 +429,7 @@ async function openSession($: EngineInterface, link: string | null): Promise<voi
 }
 
 function meta(s: RecentSession, now: number): string {
-  return [s.isRunning ? 'running' : 'idle', ago(s.lastActivityAt, now), s.isPinned ? 'pinned' : null, s.group]
+  return [s.isRunning ? 'running' : s.agentsBusy ? 'agents working' : 'idle', ago(s.lastActivityAt, now), s.isPinned ? 'pinned' : null, s.group]
     .filter(Boolean)
     .join(' · ')
 }
@@ -403,6 +487,8 @@ export const register: Register = on => {
               <Text color={DOT_FAILED}>●</Text>
             ) : s.attention === 'needsInput' ? (
               <Text color={DOT_NEEDS_INPUT}>●</Text>
+            ) : s.agentsBusy ? (
+              <Text color={DOT_AGENTS}>●</Text>
             ) : s.attention === 'yourMove' ? (
               <Text color={DOT_YOUR_MOVE}>●</Text>
             ) : s.isRunning ? (

@@ -12,6 +12,7 @@ A Claude mod for the Claude desktop app (Code tab). It docks a panel beside the 
 |---|---|
 | purple | running |
 | yellow | running, and stopped on a question to you or a plan waiting for approval |
+| orange | agents working: its own turn has ended, but background agents it started are still at work |
 | green | your move: finished, and its last reply asks you something or offers labelled options |
 | red | its last run ended in an error |
 | none | idle, nothing waiting |
@@ -81,4 +82,5 @@ claude plugin marketplace remove recent-sessions
 
 - The sidebar's own **blue "unread"** state can't be read by a mod, so it has no dot here.
 - A session stopped on a **permission prompt** shows purple, not yellow: its transcript looks the same as a tool that is still working.
+- Orange is read off the agents' own files under `~/.claude/projects/<folder>/<transcript>/subagents/`, found through the app's record of the session in `~/Library/Application Support/Claude/claude-code-sessions/`. An agent counts while its file is unfinished and has moved in the last 10 minutes, so one that is silent longer (a single long command) can drop to no dot until it writes again, and an agent stopped without finishing keeps orange for up to 10 minutes.
 - Green is a reading of the last reply's text, so a reply that ends with a quoted question can show green wrongly.
