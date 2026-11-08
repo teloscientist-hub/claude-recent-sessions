@@ -317,6 +317,34 @@ test('orange: a session whose turn ended with background agents still at work', 
   await ui.unmount()
 })
 
+test('an idle session is placed by its last real turn, not by bookkeeping the app writes', async ($, on) => {
+  const home = '/Users/someone'
+  const records = `${home}/Library/Application Support/Claude/claude-code-sessions`
+  // local_0 tops the app's list (14:00) but its last real turn was 13:50, after local_9 (13:51).
+  // local_1 has no turn time on record: it keeps the app's time.
+  const files = new Map<string, string>([
+    [`${records}/acct/org/local_0.json`, JSON.stringify({ cliSessionId: 'cli-0', lastTurnEdgeAt: Date.parse('2026-10-23T13:50:30.000Z') })],
+    [`${records}/acct/org/local_1.json`, JSON.stringify({ cliSessionId: 'cli-1' })],
+  ])
+  const dirs: Record<string, { name: string; kind: string }[]> = {
+    [records]: [{ name: 'acct', kind: 'dir' }],
+    [`${records}/acct`]: [{ name: 'org', kind: 'dir' }],
+  }
+  stubEngine(on, () => others, false, files)
+  on('fs.list', (_: unknown, e: { path: string }) =>
+    dirs[e.path] ? { value: dirs[e.path]!.map(d => ({ ...d, size: 0, mtimeMs: 0, isLink: false })) } : { deny: 'missing' },
+  )
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'refresh' })
+  const keys = (await ui.findAll({ type: 'Button' })).map(b => b.key).filter(k => /^local_\d+$/.test(String(k)))
+  expect(keys.slice(0, 2)).toEqual(['local_1', 'local_2'])
+  expect(keys.indexOf('local_0')).toBe(keys.indexOf('local_9') + 1)
+  expect(await ui.find({ type: 'Text', text: /idle · 14m/ })).toBeDefined()
+  await ui.unmount()
+})
+
 test('scheduled-task sessions are left out, each looked up once', async ($, on) => {
   const reads: string[] = []
   stubEngine(on, () => others, false, new Map(), [], {}, [], new Set(['local_3', 'local_7']), reads)

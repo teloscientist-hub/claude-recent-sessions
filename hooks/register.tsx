@@ -203,7 +203,9 @@ async function isScheduled($: EngineInterface, id: string): Promise<boolean> {
 // which only the app's own record of the session holds:
 // ~/Library/Application Support/Claude/claude-code-sessions/<a>/<b>/<app id>.json.
 let recordDirs: string[] | undefined
-const cliIds = new Map<string, string | null>()
+// Each session's app record, kept until the file changes.
+type SessionRecord = { cli: string | null; turnAt: number | null }
+const records = new Map<string, { path: string; mtimeMs: number | null; record: SessionRecord }>()
 // Meta files read as finished are not read again.
 const finishedAgents = new Set<string>()
 
@@ -215,8 +217,36 @@ async function listNames($: EngineInterface, path: string, kind: 'file' | 'dir')
   }
 }
 
-async function cliIdOf($: EngineInterface, id: string, home: string): Promise<string | null> {
-  if (cliIds.has(id)) return cliIds.get(id) ?? null
+async function parseRecord($: EngineInterface, path: string): Promise<SessionRecord> {
+  const raw = JSON.parse(await $.fs.read(path)) as { cliSessionId?: unknown; lastTurnEdgeAt?: unknown }
+  return {
+    cli: typeof raw.cliSessionId === 'string' ? raw.cliSessionId : null,
+    turnAt: typeof raw.lastTurnEdgeAt === 'number' ? raw.lastTurnEdgeAt : null,
+  }
+}
+
+async function mtimeOf($: EngineInterface, path: string): Promise<number | null> {
+  try {
+    return (await $.fs.stat(path)).mtimeMs
+  } catch {
+    return null
+  }
+}
+
+async function readRecord($: EngineInterface, id: string, home: string): Promise<SessionRecord | null> {
+  const hit = records.get(id)
+  if (hit) {
+    // The record is read again only when its file has changed (or cannot be stat'ed).
+    const mtimeMs = await mtimeOf($, hit.path)
+    if (mtimeMs !== null && mtimeMs === hit.mtimeMs) return hit.record
+    try {
+      const record = await parseRecord($, hit.path)
+      records.set(id, { path: hit.path, mtimeMs, record })
+      return record
+    } catch {
+      records.delete(id)
+    }
+  }
   if (!recordDirs) {
     const root = `${home}/Library/Application Support/Claude/claude-code-sessions`
     recordDirs = []
@@ -225,17 +255,38 @@ async function cliIdOf($: EngineInterface, id: string, home: string): Promise<st
     }
   }
   for (const dir of recordDirs) {
+    const path = `${dir}/${id}.json`
     try {
-      const record = JSON.parse(await $.fs.read(`${dir}/${id}.json`)) as { cliSessionId?: unknown }
-      const cli = typeof record.cliSessionId === 'string' ? record.cliSessionId : null
-      cliIds.set(id, cli)
-      return cli
+      const record = await parseRecord($, path)
+      records.set(id, { path, mtimeMs: await mtimeOf($, path), record })
+      return record
     } catch {
       // Not in this folder.
     }
   }
   // Unfound now may be found after a restart of the app: not cached.
   return null
+}
+
+async function cliIdOf($: EngineInterface, id: string, home: string): Promise<string | null> {
+  return (await readRecord($, id, home))?.cli ?? null
+}
+
+// The app's lastActivityAt also moves when it only rewrites bookkeeping into a
+// transcript, such as its watch on an artifact the session published. Its record's
+// lastTurnEdgeAt moves on real turns alone, so an idle session is placed by that.
+// A running session is placed by its activity, as it is working now.
+async function realActivity($: EngineInterface, s: RecentSession): Promise<string> {
+  if (s.isRunning) return s.lastActivityAt
+  try {
+    const { home } = await readShellEnv($)
+    const turnAt = (await readRecord($, s.id, home))?.turnAt
+    const activity = Date.parse(s.lastActivityAt)
+    if (turnAt == null || Number.isNaN(activity) || turnAt >= activity) return s.lastActivityAt
+    return new Date(turnAt).toISOString()
+  } catch {
+    return s.lastActivityAt
+  }
 }
 
 async function hasBusyAgents($: EngineInterface, id: string, cwd: string | undefined, now: number): Promise<boolean> {
@@ -292,7 +343,9 @@ async function refresh($: EngineInterface): Promise<void> {
     const all: RecentSession[] = [
       toSession(self, true),
       ...rows.filter(r => r.sessionId !== self.sessionId).map(r => toSession(r, false)),
-    ].sort((a, b) => Date.parse(b.lastActivityAt) - Date.parse(a.lastActivityAt))
+    ]
+    for (const s of all) s.lastActivityAt = await realActivity($, s)
+    all.sort((a, b) => Date.parse(b.lastActivityAt) - Date.parse(a.lastActivityAt))
 
     // A closed session counts again once it runs or shows newer activity. The
     // session drawing the pane is running while it works, so only its activity counts.
