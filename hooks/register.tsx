@@ -4,11 +4,11 @@ import type { EngineInterface, Register, Timer } from 'claude-code'
 import type { RecentSession, RecentSessionsView } from '../types'
 
 const PANE = 'recent-sessions'
-const LIMIT = 25
+const LIMIT = 40
 // The shorter list the panel's button switches to.
 const SHORT = 10
 // Fetched past LIMIT so closed sessions leave room for the next ones.
-const FETCH = 50
+const FETCH = 70
 const POLL_MS = 15_000
 // The desktop app's own session-management MCP server, by its usual name. The
 // live name is read off the session's tool list first, since a session may
@@ -491,7 +491,7 @@ export const register: Register = on => {
   on('session.start', async ($, e, next) => {
     await $.command.register({
       name: 'recent-sessions',
-      description: 'Show the 25 most recently active sessions in a side pane',
+      description: 'Show the 40 most recently active sessions in a side pane',
     })
     void $.ui.open({ id: PANE, title: 'Recent sessions' })
     void ensureTicking($)

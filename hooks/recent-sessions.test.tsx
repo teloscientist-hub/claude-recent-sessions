@@ -15,7 +15,7 @@ const PANE = {
 } as const
 
 // Others, newest first, a minute apart from 14:00 down.
-const others = Array.from({ length: 30 }, (_, i) => ({
+const others = Array.from({ length: 60 }, (_, i) => ({
   sessionId: `local_${i}`,
   title: `Session ${i}`,
   isRunning: false,
@@ -106,7 +106,7 @@ function stubEngine(
   on('session.start', (_: unknown, e: { cwd: string }) => ({ cwd: e.cwd }))
 }
 
-test('lists 25 sessions, this one included and bold, by recent activity', async ($, on) => {
+test('lists 40 sessions, this one included and bold, by recent activity', async ($, on) => {
   stubEngine(on, () => others.map((r, i) => ({ ...r, isRunning: i === 0 })))
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
@@ -119,9 +119,9 @@ test('lists 25 sessions, this one included and bold, by recent activity', async 
     expect(await ui.find({ type: 'Button', key: 'local_self' })).toBeUndefined()
     expect(await ui.find({ type: 'Button', key: 'close:local_self' })).toBeDefined()
 
-    // 24 others plus this one; local_24 is the 26th and drops off.
-    expect(await ui.find({ type: 'Button', key: 'local_23' })).toBeDefined()
-    expect(await ui.find({ type: 'Button', key: 'local_24' })).toBeUndefined()
+    // 39 others plus this one; local_39 is the 41st and drops off.
+    expect(await ui.find({ type: 'Button', key: 'local_38' })).toBeDefined()
+    expect(await ui.find({ type: 'Button', key: 'local_39' })).toBeUndefined()
 
     // Dots only on running sessions (local_0 and this one), drawn outside any Button.
     const dots = await ui.findAll({ type: 'Text', text: /^●$/ })
@@ -153,7 +153,7 @@ test('shows the error when the session list cannot be read', async ($, on) => {
   await ui.unmount()
 })
 
-test('a switched-off session leaves the 25 until it shows new activity', async ($, on) => {
+test('a switched-off session leaves the 40 until it shows new activity', async ($, on) => {
   let live = others
   stubEngine(on, () => live)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
@@ -162,7 +162,7 @@ test('a switched-off session leaves the 25 until it shows new activity', async (
   await ui.press({ key: 'refresh' })
   await ui.press({ key: 'close:local_1' })
   expect(await ui.find({ type: 'Button', key: 'local_1' })).toBeUndefined()
-  expect(await ui.find({ type: 'Button', key: 'local_24' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'local_39' })).toBeDefined()
 
   await ui.press({ key: 'refresh' })
   expect(await ui.find({ type: 'Button', key: 'local_1' })).toBeUndefined()
@@ -170,7 +170,7 @@ test('a switched-off session leaves the 25 until it shows new activity', async (
   live = others.map(r => (r.sessionId === 'local_1' ? { ...r, lastActivityAt: '2026-10-23T15:00:00.000Z' } : r))
   await ui.press({ key: 'refresh' })
   expect(await ui.find({ type: 'Button', key: 'local_1' })).toBeDefined()
-  expect(await ui.find({ type: 'Button', key: 'local_24' })).toBeUndefined()
+  expect(await ui.find({ type: 'Button', key: 'local_39' })).toBeUndefined()
   await ui.unmount()
 })
 
@@ -198,7 +198,7 @@ test('this session can be switched off, and returns on its next activity', async
   await ui.press({ key: 'close:local_self' })
   // Running, as the session drawing the pane is, does not bring it back.
   expect(await ui.find({ type: 'Text', text: /^This one/ })).toBeUndefined()
-  expect(await ui.find({ type: 'Button', key: 'local_24' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'local_39' })).toBeDefined()
 
   self = { ...self, lastActivityAt: '2026-10-23T15:00:00.000Z' }
   await ui.press({ key: 'refresh' })
@@ -354,11 +354,11 @@ test('scheduled-task sessions are left out, each looked up once', async ($, on) 
   await ui.press({ key: 'refresh' })
   expect(await ui.find({ type: 'Button', key: 'local_3' })).toBeUndefined()
   expect(await ui.find({ type: 'Button', key: 'local_7' })).toBeUndefined()
-  // Two left out, so two more come in: 14 others plus this session.
-  expect(await ui.find({ type: 'Button', key: 'local_25' })).toBeDefined()
-  expect(await ui.find({ type: 'Button', key: 'local_26' })).toBeUndefined()
-  // Nothing past the 15th is looked up.
-  expect(reads).not.toContain('local_27')
+  // Two left out, so two more come in: 39 others plus this session.
+  expect(await ui.find({ type: 'Button', key: 'local_40' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'local_41' })).toBeUndefined()
+  // Nothing past the 40th row is looked up.
+  expect(reads).not.toContain('local_42')
 
   const before = reads.length
   await ui.press({ key: 'refresh' })
@@ -366,7 +366,7 @@ test('scheduled-task sessions are left out, each looked up once', async ($, on) 
   await ui.unmount()
 })
 
-test('the length button switches between 25 and 10 rows', async ($, on) => {
+test('the length button switches between 40 and 10 rows', async ($, on) => {
   stubEngine(on, () => others)
   await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
 
@@ -378,14 +378,14 @@ test('the length button switches between 25 and 10 rows', async ($, on) => {
   // 9 others plus this one.
   expect(await ui.find({ type: 'Button', key: 'local_8' })).toBeDefined()
   expect(await ui.find({ type: 'Button', key: 'local_9' })).toBeUndefined()
-  expect((await ui.find({ type: 'Button', key: 'length' }))?.text).toBe('Show 25')
+  expect((await ui.find({ type: 'Button', key: 'length' }))?.text).toBe('Show 40')
 
   // A refresh keeps the choice.
   await ui.press({ key: 'refresh' })
   expect(await ui.find({ type: 'Button', key: 'local_9' })).toBeUndefined()
 
   await ui.press({ key: 'length' })
-  expect(await ui.find({ type: 'Button', key: 'local_23' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'local_38' })).toBeDefined()
   await ui.unmount()
 })
 

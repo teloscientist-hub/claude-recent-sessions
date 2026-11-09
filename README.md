@@ -2,7 +2,7 @@
 
 A Claude mod for the Claude desktop app (Code tab). It docks a panel beside the chat that lists your most recently active sessions, so you don't have to search the sidebar for them.
 
-- **25 sessions** by default; **Show 10** / **Show 25** switches the length.
+- **40 sessions** by default; **Show 10** / **Show 40** switches the length.
 - **The session you're in** is listed in bold.
 - **Click a session's title** to switch to it.
 - **The switch at the left of each row** (blue `━●` = counted). Click it to close the session out of the list (gray `●━`). A closed session comes back on its own as soon as it shows new activity, or by hand under **Show closed**, which lists the most recently closed first. Closing happens in every panel on the machine at once, within about 15 seconds.
