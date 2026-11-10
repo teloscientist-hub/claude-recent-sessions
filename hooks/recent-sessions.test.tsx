@@ -430,7 +430,12 @@ test('without RECENT_SESSIONS_STATE_DIR the closed list lives under ~/.claude', 
   await ui.press({ key: 'refresh' })
   expect(await ui.find({ type: 'Text', text: /Could not list/ })).toBeUndefined()
   await ui.press({ key: 'close:local_2' })
-  expect([...files.keys()]).toEqual(['/Users/someone/.claude/recent-sessions/closed.json'])
+  // The closed marks and the one-poller lease and snapshot share that one folder.
+  expect([...files.keys()].sort()).toEqual([
+    '/Users/someone/.claude/recent-sessions/closed.json',
+    '/Users/someone/.claude/recent-sessions/poller.json',
+    '/Users/someone/.claude/recent-sessions/snapshot.json',
+  ])
   await ui.unmount()
 })
 
@@ -477,5 +482,79 @@ test('with the app server missing it says so plainly, and recovers when it conne
   await ui.press({ key: 'refresh' })
   expect(await ui.find({ type: 'Text', text: /Could not list/ })).toBeUndefined()
   expect(await ui.find({ type: 'Button', key: 'local_0' })).toBeDefined()
+  await ui.unmount()
+})
+
+// One poller for the machine (ao3, 2026-11-10).
+const NOW = Date.parse('2026-10-23T14:05:00.000Z')
+const LEASE = '/state/recent-sessions/poller.json'
+const SNAP = '/state/recent-sessions/snapshot.json'
+const row = (id: string, title: string, extra: object = {}) => ({
+  id, title, isRunning: false, isPinned: false, group: null,
+  lastActivityAt: '2026-10-23T14:00:00.000Z', link: `claude://claude.ai/epitaxy/${id}`,
+  isCurrent: false, attention: null, agentsBusy: false, ...extra,
+})
+
+function seedLeader(files: Map<string, string>, until: number, fetchedAt: number) {
+  files.set(LEASE, JSON.stringify({ holder: 'local_leader', until }))
+  files.set(SNAP, JSON.stringify({
+    by: 'local_leader',
+    fetchedAt,
+    sessions: [
+      row('local_leader', 'The poller', { isCurrent: true }),
+      row('local_self', 'This one', { attention: 'yourMove' }),
+      row('local_7', 'Seventh', { attention: 'failed' }),
+    ],
+    closed: [],
+  }))
+}
+
+test('a follower draws the poller snapshot and lists nothing itself', async ($, on) => {
+  const files = new Map<string, string>()
+  seedLeader(files, NOW + 30_000, NOW - 5_000)
+  // list() answers list_sessions and other sessions' get_session; neither may be called.
+  let listed = 0
+  const eventReads: string[] = []
+  stubEngine(on, () => { listed += 1; return others }, false, files, [], {}, eventReads)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'recent-sessions', args: '' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  // Its own row is current, bold and dotless; the poller's row is a link.
+  expect((await ui.find({ type: 'Text', text: /^This one/ }))?.props.bold).toBe(true)
+  expect(await ui.find({ type: 'Button', key: 'local_leader' })).toBeDefined()
+  expect(await ui.find({ type: 'Button', key: 'local_2' })).toBeUndefined()
+  expect(listed).toBe(0)
+  expect(eventReads).toEqual([])
+  expect(JSON.parse(files.get(LEASE)!).holder).toBe('local_leader')
+  await ui.unmount()
+})
+
+test('a lapsed lease is taken over, and the new poller writes the snapshot', async ($, on) => {
+  const files = new Map<string, string>()
+  seedLeader(files, NOW - 1, NOW - 60_000)
+  stubEngine(on, () => others, false, files)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  await $.command.run({ command: 'recent-sessions', args: '' })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  expect(await ui.find({ type: 'Button', key: 'local_2' })).toBeDefined()
+  expect(JSON.parse(files.get(LEASE)!).holder).toBe('local_self')
+  const snap = JSON.parse(files.get(SNAP)!)
+  expect(snap.by).toBe('local_self')
+  expect(snap.sessions.some((s: { id: string }) => s.id === 'local_2')).toBe(true)
+  await ui.unmount()
+})
+
+test('Refresh polls at once even while another session holds the lease', async ($, on) => {
+  const files = new Map<string, string>()
+  seedLeader(files, NOW + 30_000, NOW - 5_000)
+  stubEngine(on, () => others, false, files)
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'refresh' })
+  expect(await ui.find({ type: 'Button', key: 'local_2' })).toBeDefined()
+  expect(JSON.parse(files.get(LEASE)!).holder).toBe('local_self')
   await ui.unmount()
 })

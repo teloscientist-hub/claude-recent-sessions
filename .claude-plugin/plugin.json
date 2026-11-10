@@ -1,1 +1,1 @@
-{ "name": "recent-sessions", "version": "0.3.6", "description": "A docked pane listing the 40 most recently active sessions with a status dot", "types": "./types/index.d.ts" }
+{ "name": "recent-sessions", "version": "0.3.7", "description": "A docked pane listing the 40 most recently active sessions with a status dot", "types": "./types/index.d.ts" }

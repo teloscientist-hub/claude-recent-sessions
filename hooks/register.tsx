@@ -20,6 +20,16 @@ const LIST_TOOL = /^mcp__(.+)__list_sessions$/
 // when it was marked closed. In $RECENT_SESSIONS_STATE_DIR when it is set,
 // else in ~/.claude/recent-sessions.
 const CLOSED_FILE = 'closed.json'
+// One poller for the machine (Mark's ao3, 2026-11-10). Every open session runs
+// a copy of this mod, and each used to call list_sessions, get_session and
+// list_events every 15 s: about 22 copies doing the same work, which made idle
+// sessions look busy to anything watching tool calls. Now the copy holding the
+// lease polls and writes what it found to the snapshot; the others read the
+// snapshot and make no calls. A lease not renewed for LEASE_MS is free to take,
+// so when the poller's session closes another copy takes over within 45 s.
+const LEASE_FILE = 'poller.json'
+const SNAPSHOT_FILE = 'snapshot.json'
+const LEASE_MS = POLL_MS * 3
 
 // The sidebar's own unread / needs-input / failed states are not exposed to
 // mods. Needs-input and failed are read off each transcript's tail instead
@@ -98,9 +108,59 @@ async function readShellEnv($: EngineInterface): Promise<{ stateDir: string; hom
   return shellEnv
 }
 
-async function closedFile($: EngineInterface): Promise<string> {
+async function stateFile($: EngineInterface, name: string): Promise<string> {
   const { stateDir, home } = await readShellEnv($)
-  return `${stateDir || `${home}/.claude/recent-sessions`}/${CLOSED_FILE}`
+  return `${stateDir || `${home}/.claude/recent-sessions`}/${name}`
+}
+
+async function closedFile($: EngineInterface): Promise<string> {
+  return stateFile($, CLOSED_FILE)
+}
+
+type Lease = { holder: string; until: number }
+type Snapshot = { by: string; fetchedAt: number; sessions: RecentSession[]; closed: RecentSession[] }
+
+// A shared file that is missing, half-written or unreadable reads as absent.
+async function readShared<T>($: EngineInterface, name: string): Promise<T | null> {
+  try {
+    const path = await stateFile($, name)
+    if (!(await $.fs.exists(path))) return null
+    return JSON.parse(await $.fs.read(path)) as T
+  } catch {
+    return null
+  }
+}
+
+let selfId: string | undefined
+
+async function mySessionId($: EngineInterface): Promise<string> {
+  if (selfId) return selfId
+  selfId = ((await callJson($, 'get_session', { session_id: 'self' })) as Row).sessionId
+  return selfId
+}
+
+// A follower draws the poller's list as its own: its own row is the current one,
+// and, as before, carries no transcript dot (list_events refuses its own session).
+function asSeenBy(me: string, s: RecentSession): RecentSession {
+  const isCurrent = s.id === me
+  return { ...s, isCurrent, attention: isCurrent ? null : s.attention }
+}
+
+// True when another copy holds the lease and its snapshot is fresh: the view is
+// then drawn from that snapshot and no session tools are called.
+async function followSnapshot($: EngineInterface, me: string, now: number): Promise<boolean> {
+  const lease = await readShared<Lease>($, LEASE_FILE)
+  if (!lease || lease.holder === me || now >= lease.until) return false
+  const snap = await readShared<Snapshot>($, SNAPSHOT_FILE)
+  if (!snap || now - snap.fetchedAt >= LEASE_MS || !Array.isArray(snap.sessions) || !Array.isArray(snap.closed)) return false
+  await update($, view, v => ({
+    ...v,
+    sessions: snap.sessions.map(s => asSeenBy(me, s)),
+    closed: snap.closed.map(s => asSeenBy(me, s)),
+    error: null,
+    fetchedAt: snap.fetchedAt,
+  }))
+  return true
 }
 
 async function readClosed($: EngineInterface): Promise<Closed> {
@@ -334,8 +394,14 @@ function toSession(r: Row, isCurrent: boolean): RecentSession {
   }
 }
 
-async function refresh($: EngineInterface): Promise<void> {
+// force: poll now whoever holds the lease (Refresh, closing or reopening a row),
+// so the person's own click never waits on another session's poll.
+async function refresh($: EngineInterface, force = false): Promise<void> {
   try {
+    const me = await mySessionId($)
+    const startedAt = await $.clock.now()
+    if (!force && (await followSnapshot($, me, startedAt))) return
+    await $.fs.write(await stateFile($, LEASE_FILE), `${JSON.stringify({ holder: me, until: startedAt + LEASE_MS })}\n`)
     // list_sessions leaves out the session it is asked from; get_session adds it back.
     const rows = (await callJson($, 'list_sessions', { limit: FETCH })) as Row[]
     const self = (await callJson($, 'get_session', { session_id: 'self' })) as Row
@@ -387,6 +453,12 @@ async function refresh($: EngineInterface): Promise<void> {
 
     const fetchedAt = await $.clock.now()
     await update($, view, v => ({ ...v, sessions, closed, error: null, fetchedAt }))
+    try {
+      const snap: Snapshot = { by: me, fetchedAt, sessions, closed }
+      await $.fs.write(await stateFile($, SNAPSHOT_FILE), `${JSON.stringify(snap)}\n`)
+    } catch {
+      // Unwritten, the followers' snapshot goes stale and one of them polls instead.
+    }
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     await update($, view, v => ({ ...v, error: message }))
@@ -403,7 +475,7 @@ let isRefreshing = false
 // isRefreshing forever, which is the same freeze by another road.
 const REFRESH_LIMIT_MS = 60_000
 
-async function refreshOnce($: EngineInterface): Promise<void> {
+async function refreshOnce($: EngineInterface, force = false): Promise<void> {
   if (isRefreshing) return
   isRefreshing = true
   let isDone = false
@@ -412,7 +484,7 @@ async function refreshOnce($: EngineInterface): Promise<void> {
     const limit = $.clock.sleep(REFRESH_LIMIT_MS).then(() => {
       if (!isDone) throw new Error(`a refresh took longer than ${REFRESH_LIMIT_MS / 1000}s`)
     })
-    await Promise.race([refresh($), limit])
+    await Promise.race([refresh($, force), limit])
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
     await update($, view, v => ({ ...v, error: message }))
@@ -448,14 +520,14 @@ async function markClosed($: EngineInterface, s: RecentSession): Promise<void> {
   const marks = await readClosed($)
   const closedAt = new Date(await $.clock.now()).toISOString()
   await writeClosed($, { ...marks, [s.id]: { activity: s.lastActivityAt, closedAt } })
-  await refresh($)
+  await refresh($, true)
 }
 
 async function reopen($: EngineInterface, id: string): Promise<void> {
   const marks = await readClosed($)
   delete marks[id]
   await writeClosed($, marks)
-  await refresh($)
+  await refresh($, true)
 }
 
 async function toggleLength($: EngineInterface): Promise<void> {
@@ -561,7 +633,7 @@ export const register: Register = on => {
           </Box>
         ))}
         <Box flexDirection="row" gap={1}>
-          <Button key="refresh" onPress={() => refreshOnce($)}>Refresh</Button>
+          <Button key="refresh" onPress={() => refreshOnce($, true)}>Refresh</Button>
           <Button key="length" dimColor onPress={() => toggleLength($)}>
             {v.limit === SHORT ? `Show ${LIMIT}` : `Show ${SHORT}`}
           </Button>
