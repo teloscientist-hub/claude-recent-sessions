@@ -8,7 +8,7 @@ const LIMIT = 40
 // The shorter list the panel's button switches to.
 const SHORT = 10
 // Fetched past LIMIT so closed sessions leave room for the next ones.
-const FETCH = 70
+const FETCH = 150
 const POLL_MS = 15_000
 // The desktop app's own session-management MCP server, by its usual name. The
 // live name is read off the session's tool list first, since a session may
