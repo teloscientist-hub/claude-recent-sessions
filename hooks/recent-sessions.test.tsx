@@ -37,6 +37,9 @@ let self = {
 
 const CLOSED = '/state/recent-sessions/closed.json'
 
+// When set, the text list_sessions replies with, given its limit (overflow tests).
+let listReply: ((limit: number) => string) | undefined
+
 // The file system has no bottom in the kit: a map stands for the shared file,
 // and every session's panel would read and write the same one.
 function stubFiles(on: any, files: Map<string, string>) {
@@ -92,6 +95,10 @@ function stubEngine(
       detailReads.push(id)
       const row = list().find(r => (r as { sessionId: string }).sessionId === id) ?? {}
       const text = JSON.stringify(scheduled.has(id) ? { ...row, scheduledTaskId: 'daily-thing' } : row)
+      return { value: { content: [{ type: 'text', text }], isError: false } }
+    }
+    if (e.tool === 'list_sessions' && listReply) {
+      const text = listReply((e.args as { limit?: number }).limit ?? 0)
       return { value: { content: [{ type: 'text', text }], isError: false } }
     }
     const text = JSON.stringify(e.tool === 'get_session' ? self : list())
@@ -435,6 +442,7 @@ test('without RECENT_SESSIONS_STATE_DIR the closed list lives under ~/.claude', 
     '/Users/someone/.claude/recent-sessions/closed.json',
     '/Users/someone/.claude/recent-sessions/poller.json',
     '/Users/someone/.claude/recent-sessions/snapshot.json',
+    '/Users/someone/.claude/recent-sessions/trace-local_self.json',
   ])
   await ui.unmount()
 })
@@ -556,5 +564,40 @@ test('Refresh polls at once even while another session holds the lease', async (
   await ui.press({ key: 'refresh' })
   expect(await ui.find({ type: 'Button', key: 'local_2' })).toBeDefined()
   expect(JSON.parse(files.get(LEASE)!).holder).toBe('local_self')
+  await ui.unmount()
+})
+
+test('a session list too large for one reply is read from the file the app saved it to', async ($, on) => {
+  const files = new Map<string, string>()
+  stubEngine(on, () => others, false, files)
+  const saved = '/Users/someone/.claude/projects/x/tool-results/mcp-list_sessions-1.txt'
+  files.set(saved, JSON.stringify(others))
+  listReply = () =>
+    `Error: result (78,588 characters across 1,958 lines) exceeds maximum allowed tokens. Output has been saved to ${saved}.\nFormat: Plain text`
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'refresh' })
+  listReply = undefined
+  expect(await ui.find({ type: 'Button', key: 'local_38' })).toBeDefined()
+  expect(await ui.find({ type: 'Text', text: /Could not list/ })).toBeUndefined()
+  await ui.unmount()
+})
+
+test('with no saved file, a refused list is asked again for fewer sessions', async ($, on) => {
+  stubEngine(on, () => others)
+  const limits: number[] = []
+  listReply = limit => {
+    limits.push(limit)
+    return limit > 80
+      ? 'Error: result (78,588 characters) exceeds maximum allowed tokens.'
+      : JSON.stringify(others.slice(0, limit))
+  }
+  await $.session.start({ cwd: '/', surface: 'desktop', isInteractive: true })
+  const ui = await $.ui.mount({ ...PANE, surface: 'desktop' })
+  await ui.press({ key: 'refresh' })
+  listReply = undefined
+  // Opening the pane refreshes too; the second refresh starts at the limit that worked.
+  expect(limits).toEqual([150, 75, 75])
+  expect(await ui.find({ type: 'Button', key: 'local_38' })).toBeDefined()
   await ui.unmount()
 })

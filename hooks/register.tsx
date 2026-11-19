@@ -210,7 +210,31 @@ async function callJson($: EngineInterface, tool: string, args: Record<string, u
   const res = await mcpCall($, tool, args)
   const block = res.content.find(b => b.type === 'text') as { text?: string } | undefined
   if (res.isError || !block?.text) throw new Error(block?.text ?? 'no result')
-  return JSON.parse(block.text)
+  const text = block.text
+  if (!/^\s*[[{]/.test(text)) {
+    // A reply over the tool-result size cap arrives as plain text ("Error: result
+    // (78,588 characters ...) exceeds maximum allowed tokens. Output has been saved
+    // to <path>.txt") rather than as an error. The full JSON is in that file.
+    const saved = /saved to (\/\S+?\.txt)/.exec(text)?.[1]
+    if (saved && (await $.fs.exists(saved))) return JSON.parse(await $.fs.read(saved))
+    throw new Error(text.slice(0, 200))
+  }
+  return JSON.parse(text)
+}
+
+// The largest list_sessions limit that has come back whole; halved when a reply is refused.
+let fetchLimit = FETCH
+
+async function listSessions($: EngineInterface): Promise<Row[]> {
+  for (;;) {
+    try {
+      return (await callJson($, 'list_sessions', { limit: fetchLimit })) as Row[]
+    } catch (err) {
+      const message = err instanceof Error ? err.message : String(err)
+      if (!/exceeds maximum/i.test(message) || fetchLimit <= LIMIT) throw err
+      fetchLimit = Math.max(LIMIT, Math.floor(fetchLimit / 2))
+    }
+  }
 }
 
 // Transcript reads are cached per session until its activity or running state moves.
@@ -394,6 +418,24 @@ function toSession(r: Row, isCurrent: boolean): RecentSession {
   }
 }
 
+// Each refresh's step times and outcome, one file per session, so a refresh that
+// stalls or fails can be measured instead of guessed at (2026-11-18).
+type Trace = { at: number; force: boolean; steps: [string, number][]; error?: string }
+let trace: Trace | undefined
+
+async function step($: EngineInterface, name: string): Promise<void> {
+  if (trace) trace.steps.push([name, (await $.clock.now()) - trace.at])
+}
+
+async function writeTrace($: EngineInterface, me: string): Promise<void> {
+  if (!trace) return
+  try {
+    await $.fs.write(await stateFile($, `trace-${me}.json`), `${JSON.stringify(trace)}\n`)
+  } catch {
+    // A trace that cannot be written changes nothing else.
+  }
+}
+
 // force: poll now whoever holds the lease (Refresh, closing or reopening a row),
 // so the person's own click never waits on another session's poll.
 async function refresh($: EngineInterface, force = false): Promise<void> {
@@ -401,16 +443,20 @@ async function refresh($: EngineInterface, force = false): Promise<void> {
     const me = await mySessionId($)
     const startedAt = await $.clock.now()
     if (!force && (await followSnapshot($, me, startedAt))) return
+    trace = { at: startedAt, force, steps: [] }
     await $.fs.write(await stateFile($, LEASE_FILE), `${JSON.stringify({ holder: me, until: startedAt + LEASE_MS })}\n`)
     // list_sessions leaves out the session it is asked from; get_session adds it back.
-    const rows = (await callJson($, 'list_sessions', { limit: FETCH })) as Row[]
+    const rows = await listSessions($)
+    await step($, 'list_sessions')
     const self = (await callJson($, 'get_session', { session_id: 'self' })) as Row
+    await step($, 'get_session self')
     scheduledCache.set(self.sessionId, typeof self.scheduledTaskId === 'string' && self.scheduledTaskId !== '')
     const all: RecentSession[] = [
       toSession(self, true),
       ...rows.filter(r => r.sessionId !== self.sessionId).map(r => toSession(r, false)),
     ]
     for (const s of all) s.lastActivityAt = await realActivity($, s)
+    await step($, `real turn times (${all.length})`)
     all.sort((a, b) => Date.parse(b.lastActivityAt) - Date.parse(a.lastActivityAt))
 
     // A closed session counts again once it runs or shows newer activity. The
@@ -433,10 +479,13 @@ async function refresh($: EngineInterface, force = false): Promise<void> {
         sessions.push(s)
       }
     }
+    await step($, `rows and closed (${sessions.length}/${closed.length})`)
     // list_events refuses the session it is asked from; its own state shows anyway.
     for (const s of sessions) if (!s.isCurrent) s.attention = await readAttention($, s)
+    await step($, 'dots')
     const probedAt = await $.clock.now()
     for (const s of sessions) if (!s.isRunning) s.agentsBusy = await hasBusyAgents($, s.id, s.cwd, probedAt)
+    await step($, 'agents')
 
     // Most recently closed first; marks with no close time after, by activity.
     closed.sort((a, b) => {
@@ -457,11 +506,22 @@ async function refresh($: EngineInterface, force = false): Promise<void> {
     try {
       const snap: Snapshot = { by: me, fetchedAt, sessions, closed }
       await $.fs.write(await stateFile($, SNAPSHOT_FILE), `${JSON.stringify(snap)}\n`)
-    } catch {
+      await step($, 'snapshot written')
+    } catch (err) {
       // Unwritten, the followers' snapshot goes stale and one of them polls instead.
+      if (trace) trace.error = `snapshot: ${err instanceof Error ? err.message : String(err)}`
     }
+    await writeTrace($, me)
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
+    if (trace) {
+      trace.error = message
+      try {
+        await writeTrace($, await mySessionId($))
+      } catch {
+        // No id, no trace.
+      }
+    }
     await update($, view, v => ({ ...v, error: message }))
   }
 }
@@ -488,6 +548,14 @@ async function refreshOnce($: EngineInterface, force = false): Promise<void> {
     await Promise.race([refresh($, force), limit])
   } catch (err) {
     const message = err instanceof Error ? err.message : String(err)
+    if (trace && !trace.error) {
+      trace.error = message
+      try {
+        await writeTrace($, await mySessionId($))
+      } catch {
+        // No id, no trace.
+      }
+    }
     await update($, view, v => ({ ...v, error: message }))
   } finally {
     isDone = true
