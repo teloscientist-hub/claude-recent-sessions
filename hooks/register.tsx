@@ -423,12 +423,13 @@ async function refresh($: EngineInterface, force = false): Promise<void> {
       const mark = marks[s.id]
       // Scheduled-task runs are left out; looked up only while a row could still use them.
       if (sessions.length >= LIMIT && mark === undefined) continue
-      if (await isScheduled($, s.id)) continue
       const isRestarted = (!s.isCurrent && s.isRunning) || (mark !== undefined && Date.parse(s.lastActivityAt) > Date.parse(activityOf(mark)))
       if (mark !== undefined && !isRestarted) {
+        // A closed row costs no lookup: with many closed, one call each pushed a
+        // refresh past its time limit and the list stopped updating (2026-11-18).
         kept[s.id] = mark
         closed.push(s)
-      } else if (sessions.length < LIMIT) {
+      } else if (sessions.length < LIMIT && !(await isScheduled($, s.id))) {
         sessions.push(s)
       }
     }
